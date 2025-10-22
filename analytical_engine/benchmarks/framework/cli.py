@@ -643,6 +643,103 @@ def run_command(command, working_dir="."):
         click.secho(f"💥 An unexpected error occurred: {e}", fg="red")
 
 
+# --- Helper Functions for Performance Evaluation ---
+def download_sample_datasets():
+    """Download sample datasets if not already present."""
+    dataset_urls = [
+        "https://graphscope.oss-cn-beijing.aliyuncs.com/benchmark_datasets/sample_data.zip",
+    ]
+    
+    # Check if sample_data folder exists; if so, skip download
+    if os.path.exists("sample_data"):
+        click.secho("sample_data folder already exists. Skipping dataset download.", fg="cyan")
+        return
+    
+    for url in dataset_urls:
+        filename = os.path.basename(url)
+        file_path = os.path.join(filename)
+        if not os.path.exists(file_path):
+            click.secho(f"Downloading dataset: {filename} ...", fg="yellow")
+            try:
+                response = requests.get(url, stream=True)
+                response.raise_for_status()
+                with open(file_path, "wb") as f:
+                    for chunk in response.iter_content(chunk_size=8192):
+                        f.write(chunk)
+                click.secho(f"✅ Downloaded: {filename}", fg="green")
+                if filename.endswith(".zip"):
+                    with zipfile.ZipFile(file_path, "r") as zip_ref:
+                        zip_ref.extractall()
+                    click.secho(f"✅ Extracted: {filename}", fg="green")
+                    # Remove zip file after extraction
+                    os.remove(file_path)
+                    click.secho(f"🗑️ Removed zip file: {filename}", fg="green")
+            except Exception as e:
+                click.secho(f"❌ Failed to download {filename}: {e}", fg="red")
+        else:
+            click.secho(f"Dataset already exists: {filename}", fg="cyan")
+
+
+def setup_graphx_files(platform_dir):
+    """Download GraphX-specific jar and shell script files."""
+    graphx_base_url = "https://graphscope.oss-cn-beijing.aliyuncs.com/benchmark_datasets/"
+    graphx_files = [
+        "pagerankexample_2.11-0.1.jar",
+        "ssspexample_2.11-0.1.jar",
+        "trianglecountingexample_2.11-0.1.jar",
+        "labelpropagationexample_2.11-0.1.jar",
+        "coreexample_2.11-0.1.jar",
+        "connectedcomponentexample_2.11-0.1.jar",
+        "betweennesscentralityexample_2.11-0.1.jar",
+        "kcliqueexample_2.11-0.1.jar",
+    ]
+    graphx_sh_files = [
+        "pagerank.sh", "sssp.sh", "trianglecounting.sh", "labelpropagation.sh",
+        "core.sh", "connectedcomponent.sh", "betweennesscentrality.sh", "kclique.sh"
+    ]
+    
+    # If GraphX directory does not exist, create it
+    if not os.path.exists(platform_dir):
+        click.secho(f"GraphX directory '{platform_dir}' not found. Creating...", fg="yellow")
+        os.makedirs(platform_dir, exist_ok=True)
+
+    # Download .jar files if missing
+    for fname in graphx_files:
+        fpath = os.path.join(platform_dir, fname)
+        url = graphx_base_url + fname
+        if not os.path.exists(fpath):
+            click.secho(f"Downloading GraphX jar: {fname} ...", fg="yellow")
+            try:
+                resp = requests.get(url, stream=True)
+                resp.raise_for_status()
+                with open(fpath, "wb") as f:
+                    for chunk in resp.iter_content(chunk_size=8192):
+                        f.write(chunk)
+                click.secho(f"✅ Downloaded: {fname}", fg="green")
+            except Exception as e:
+                click.secho(f"❌ Failed to download {fname}: {e}", fg="red")
+        else:
+            click.secho(f"Jar already exists: {fname}", fg="cyan")
+            
+    # Download .sh files if missing
+    for sh_file in graphx_sh_files:
+        sh_path = os.path.join(platform_dir, sh_file)
+        url = graphx_base_url + sh_file
+        if not os.path.exists(sh_path):
+            click.secho(f"Downloading GraphX script: {sh_file} ...", fg="yellow")
+            try:
+                resp = requests.get(url, stream=True)
+                resp.raise_for_status()
+                with open(sh_path, "wb") as f:
+                    for chunk in resp.iter_content(chunk_size=8192):
+                        f.write(chunk)
+                click.secho(f"✅ Downloaded: {sh_file}", fg="green")
+            except Exception as e:
+                click.secho(f"❌ Failed to download {sh_file}: {e}", fg="red")
+        else:
+            click.secho(f"Script already exists: {sh_file}", fg="cyan")
+
+
 # --- Platform & Algorithm Definitions ---
 PLATFORM_CONFIG = {
     "flash": {"dir": "Flash", "algos": {"pagerank": "pagerank", "sssp": "sssp", "triangle": "triangle", "lpa": "lpa", "cd": "k-core-search", "kclique": "clique", "cc": "cc", "bc": "bc"}},
@@ -721,19 +818,26 @@ def llm_evaluation(platform, algorithm):
         return
 
     docker_image = "graphanalysisbenchmarks/llm-eval:latest"
+    
+    # Get docker executable path for security
+    docker = shutil.which("docker")
+    if docker is None:
+        click.secho("❌ Error: docker command not found in PATH. Please install Docker.", fg="red")
+        return
+    
     # Check if the docker image exists locally, if not, try to pull it
     try:
-        result = subprocess.run(["docker", "image", "inspect", docker_image], capture_output=True)
+        result = subprocess.run([docker, "image", "inspect", docker_image], capture_output=True)
         if result.returncode != 0:
             click.secho(f"'{docker_image}' image not found locally. Pulling from Docker Hub...", fg="yellow")
-            pull_result = subprocess.run(["docker", "pull", docker_image], check=True)
+            pull_result = subprocess.run([docker, "pull", docker_image], check=True)
             click.secho(f"✅ '{docker_image}' image pulled successfully.", fg="green")
     except Exception as e:
         click.secho(f"Error checking or pulling Docker image '{docker_image}': {e}", fg="red")
         return
 
     if platform and algorithm:
-        cmd = ["docker", "run", "--rm", "-e", f"OPENAI_API_KEY={api_key}", "-e", f"PLATFORM={platform}", "-e",
+        cmd = [docker, "run", "--rm", "-e", f"OPENAI_API_KEY={api_key}", "-e", f"PLATFORM={platform}", "-e",
                f"ALGORITHM={algorithm}", docker_image]
         run_command(cmd)
     else:
@@ -763,100 +867,14 @@ def perf(platform, algorithm, data_path, spark_master):
 
     # Translate the standard name to the platform-specific name for execution
     platform_specific_algorithm = algos_map[algorithm]
-
     platform_dir = config['dir']
 
-    # sample_data_dir = "sample_data"
-    # os.makedirs(sample_data_dir, exist_ok=True)
-
-    dataset_urls = [
-        "https://graphscope.oss-cn-beijing.aliyuncs.com/benchmark_datasets/sample_data.zip",
-    ]
-    # Check if sample_data folder exists; if so, skip download
-    if os.path.exists("sample_data"):
-        click.secho("sample_data folder already exists. Skipping dataset download.", fg="cyan")
-    else:
-        for url in dataset_urls:
-            filename = os.path.basename(url)
-            file_path = os.path.join(filename)
-            if not os.path.exists(file_path):
-                click.secho(f"Downloading dataset: {filename} ...", fg="yellow")
-                try:
-                    response = requests.get(url, stream=True)
-                    response.raise_for_status()
-                    with open(file_path, "wb") as f:
-                        for chunk in response.iter_content(chunk_size=8192):
-                            f.write(chunk)
-                    click.secho(f"✅ Downloaded: {filename}", fg="green")
-                    if filename.endswith(".zip"):
-                        with zipfile.ZipFile(file_path, "r") as zip_ref:
-                            zip_ref.extractall()
-                        click.secho(f"✅ Extracted: {filename}", fg="green")
-                        # Remove zip file after extraction
-                        os.remove(file_path)
-                        click.secho(f"🗑️ Removed zip file: {filename}", fg="green")
-                except Exception as e:
-                    click.secho(f"❌ Failed to download {filename}: {e}", fg="red")
-            else:
-                click.secho(f"Dataset already exists: {filename}", fg="cyan")
+    # Download sample datasets
+    download_sample_datasets()
 
     if platform == 'graphx':
-
-        # Download all related .jar and .sh files for GraphX
-        graphx_base_url = "https://graphscope.oss-cn-beijing.aliyuncs.com/benchmark_datasets/"
-        graphx_files = [
-            "pagerankexample_2.11-0.1.jar",
-            "ssspexample_2.11-0.1.jar",
-            "trianglecountingexample_2.11-0.1.jar",
-            "labelpropagationexample_2.11-0.1.jar",
-            "coreexample_2.11-0.1.jar",
-            "connectedcomponentexample_2.11-0.1.jar",
-            "betweennesscentralityexample_2.11-0.1.jar",
-            "kcliqueexample_2.11-0.1.jar",
-        ]
-        graphx_sh_files = [
-            "pagerank.sh", "sssp.sh", "trianglecounting.sh", "labelpropagation.sh",
-            "core.sh", "connectedcomponent.sh", "betweennesscentrality.sh", "kclique.sh"
-        ]
-        # If GraphX directory does not exist, create it
-        if not os.path.exists(platform_dir):
-            click.secho(f"GraphX directory '{platform_dir}' not found. Creating...", fg="yellow")
-            os.makedirs(platform_dir, exist_ok=True)
-
-        # Download .jar files if missing
-        for fname in graphx_files:
-            fpath = os.path.join(platform_dir, fname)
-            url = graphx_base_url + fname
-            if not os.path.exists(fpath):
-                click.secho(f"Downloading GraphX jar: {fname} ...", fg="yellow")
-                try:
-                    resp = requests.get(url, stream=True)
-                    resp.raise_for_status()
-                    with open(fpath, "wb") as f:
-                        for chunk in resp.iter_content(chunk_size=8192):
-                            f.write(chunk)
-                        click.secho(f"✅ Downloaded: {fname}", fg="green")
-                except Exception as e:
-                    click.secho(f"❌ Failed to download {fname}: {e}", fg="red")
-                else:
-                    click.secho(f"Jar already exists: {fname}", fg="cyan")
-        # Download .sh files if missing
-        for sh_file in graphx_sh_files:
-            sh_path = os.path.join(platform_dir, sh_file)
-            url = graphx_base_url + sh_file
-            if not os.path.exists(sh_path):
-                click.secho(f"Downloading GraphX script: {sh_file} ...", fg="yellow")
-                try:
-                    resp = requests.get(url, stream=True)
-                    resp.raise_for_status()
-                    with open(sh_path, "wb") as f:
-                        for chunk in resp.iter_content(chunk_size=8192):
-                            f.write(chunk)
-                    click.secho(f"✅ Downloaded: {sh_file}", fg="green")
-                except Exception as e:
-                    click.secho(f"❌ Failed to download {sh_file}: {e}", fg="red")
-                else:
-                    click.secho(f"Script already exists: {sh_file}", fg="cyan")
+        # Setup GraphX-specific files
+        setup_graphx_files(platform_dir)
 
         if not spark_master:
             click.secho("❌ Error: --spark-master is required for the 'graphx' platform.", fg="red")
