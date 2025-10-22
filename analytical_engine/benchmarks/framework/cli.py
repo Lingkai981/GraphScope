@@ -3,502 +3,606 @@ import os
 import subprocess
 import click
 from dotenv import load_dotenv
-from config import render_mpijob_yaml
 import tempfile
 import shutil
+import requests, zipfile, io
+import sys
 
 
 # Load environment variables from .env file at the start
 load_dotenv()
 
-def run_flash_perf(algorithm, data_path):
+def run_flash_perf(algorithm, data_path=None):
     THREAD_LIST = [1, 2, 4, 8, 16, 32]
     MACHINE_LIST = [2, 4, 8, 16]
-    DATASETS = ["Standard", "Density", "Diameter"]
     MEMORY = "100Gi"
     CPU = "32"
-    yaml_dir = "kubectl-yaml"
-    os.makedirs(yaml_dir, exist_ok=True)
+    yaml_dir = "config"
+    template_path = os.path.join(yaml_dir, "flash-mpijob-template.yaml")
 
     output_dir = "output"
     os.makedirs(output_dir, exist_ok=True)
+
+    # if data_path is None:
+    #     if algorithm == "sssp":
+    #         data_path = os.path.abspath("sample_data/flash_sssp_sample_graph/")
+    #     else:
+    #         data_path = os.path.abspath("sample_data/flash_sample_graph/")
 
     if algorithm == "k-core-search":
         ALGORITHM_PARAMETER_ = 3
     elif algorithm == "clique":
         ALGORITHM_PARAMETER_ = 5
     else:
-        ALGORITHM_PARAMETER_ = 0
+        ALGORITHM_PARAMETER_ = 1
 
-    for dataset in DATASETS:
-        if algorithm == "sssp":
-            DATASET_NAME = f"flash-sssp-edges-8-{dataset}"
-        else:
-            DATASET_NAME = f"flash-edges-8-{dataset}"
-        for thread in THREAD_LIST:
-            params = {
-                "job_name": "flash-mpijob",
-                "SLOTS_PER_WORKER": thread,
-                "HOST_PATH": data_path,
-                "CPU": CPU,
-                "MEMORY": MEMORY,
-                "REPLICAS": 1,
-                "MPIRUN_NP": thread,
-                "DATASET": DATASET_NAME,
-                "ALGORITHM": algorithm,
-                "ALGORITHM_PARAMETER": ALGORITHM_PARAMETER_,
-                "SINGLE_MACHINE": 1,
-            }
-            yaml_str = render_mpijob_yaml("flash", params)
-            yaml_path = f"{yaml_dir}/{params['job_name']}-{algorithm}.yaml"
+    VOLUMES_BLOCK = ''
+    VOLUME_MOUNTS_BLOCK = ''
+
+    if algorithm != 'sssp':
+        VOLUMES_BLOCK = f"volumes:\n          - name: flash-data\n            hostPath:\n              path: {data_path}\n              type: Directory" if data_path else ""
+        VOLUME_MOUNTS_BLOCK = f"volumeMounts:\n            - name: flash-data\n              mountPath: /opt/data" if data_path else ""
+    else:
+        VOLUMES_BLOCK = f"volumes:\n          - name: flash-data\n            hostPath:\n              path: {data_path}\n              type: Directory" if data_path else ""
+        VOLUME_MOUNTS_BLOCK = f"volumeMounts:\n            - name: flash-data\n              mountPath: /opt/data_sssp" if data_path else ""
+    
+    try:
+        with open(template_path, 'r') as f:
+            template_str = f.read()
+    except FileNotFoundError:
+        print(f"[ERROR] Template file not found: {template_path}")
+        return
+
+    for thread in THREAD_LIST:
+        params = {
+            "SLOTS_PER_WORKER": thread,
+            "HOST_PATH": data_path,
+            "CPU": CPU,
+            "MEMORY": MEMORY,
+            "REPLICAS": 1,
+            "MPIRUN_NP": thread,
+            "ALGORITHM": algorithm,
+            "ALGORITHM_PARAMETER": ALGORITHM_PARAMETER_,
+            "SINGLE_MACHINE": 1,
+            "VOLUMES_BLOCK": VOLUMES_BLOCK,
+            "VOLUME_MOUNTS_BLOCK": VOLUME_MOUNTS_BLOCK,
+        }
+        
+        yaml_str = template_str
+        for key, value in params.items():
+            yaml_str = yaml_str.replace(f"${{{key}}}", str(value))
+        
+        yaml_path = os.path.join(yaml_dir, f"flash-mpijob-{algorithm}-single.yaml")
+        
+        try:
             with open(yaml_path, "w") as f:
                 f.write(yaml_str)
-            try:
-                kubectl = shutil.which("kubectl")
-                if kubectl is None:
-                    raise RuntimeError("kubectl not found in PATH")
-                else:
-                    subprocess.run([kubectl, "-n", "hadoop", "delete", "-f", yaml_path], check=True)
-                    print(f"[INFO] Submitting MPIJob: {algorithm} single-machine, threads={thread}")
-                    subprocess.run([kubectl, "apply", "-f", yaml_path], check=True)
-                    subprocess.run([kubectl, "wait", "--for=condition=Succeeded", "mpijob/flash-mpijob", "--timeout=100m"], check=True)
-                    log_file = os.path.join(output_dir, f"flash_{algorithm}-{DATASET_NAME}-n1-p{thread}.log")
-                    subprocess.run([kubectl, "logs", "job/flash-mpijob-launcher"], stdout=open(log_file, "w"), check=True)
-                    subprocess.run([kubectl, "delete", "-f", yaml_path], check=True)
-            finally:
-                pass
- 
 
-    for dataset in DATASETS:
-        if algorithm == "sssp":
-            DATASET_NAME = f"flash-sssp-edges-9-{dataset}"
-        else:
-            DATASET_NAME = f"flash-edges-9-{dataset}"
-        for machines in MACHINE_LIST:
-            params = {
-                "job_name": "flash-mpijob",
-                "SLOTS_PER_WORKER": 32,
-                "HOST_PATH": data_path,
-                "CPU": CPU,
-                "MEMORY": MEMORY,
-                "REPLICAS": machines,
-                "MPIRUN_NP": machines * 32,
-                "DATASET": DATASET_NAME,
-                "ALGORITHM": algorithm,
-                "ALGORITHM_PARAMETER": ALGORITHM_PARAMETER_,
-                "SINGLE_MACHINE": 0,
-            }
-            yaml_str = render_mpijob_yaml("flash", params)
+            kubectl = shutil.which("kubectl")
+            if kubectl is None:
+                raise RuntimeError("kubectl not found in PATH")
             
-            yaml_path = f"{yaml_dir}/{params['job_name']}-{algorithm}.yaml"
+            print(f"[INFO] Submitting MPIJob: {algorithm} single-machine, threads={thread}")
+            subprocess.run([kubectl, "apply", "-f", yaml_path], check=True)
+            subprocess.run([kubectl, "wait", "--for=condition=Succeeded", "mpijob/flash-mpijob", "--timeout=100m"], check=True)
+            dataset_name = os.path.basename(os.path.normpath(data_path))
+            log_file = os.path.join(output_dir, f"flash_{algorithm}-{dataset_name}-n1-p{thread}.log")
+            subprocess.run([kubectl, "logs", "job/flash-mpijob-launcher"], stdout=open(log_file, "w"), check=True)
+            subprocess.run([kubectl, "delete", "-f", yaml_path], check=True)
+        finally:
+            if os.path.exists(yaml_path):
+                os.remove(yaml_path)
+                pass
+
+    for machines in MACHINE_LIST:
+        params = {
+            "SLOTS_PER_WORKER": 32,
+            "HOST_PATH": data_path,
+            "CPU": CPU,
+            "MEMORY": MEMORY,
+            "REPLICAS": machines,
+            "MPIRUN_NP": machines * 32,
+            "ALGORITHM": algorithm,
+            "ALGORITHM_PARAMETER": ALGORITHM_PARAMETER_,
+            "SINGLE_MACHINE": 0,
+            "VOLUMES_BLOCK": VOLUMES_BLOCK,
+            "VOLUME_MOUNTS_BLOCK": VOLUME_MOUNTS_BLOCK,
+        }
+        
+        yaml_str = template_str
+        for key, value in params.items():
+            yaml_str = yaml_str.replace(f"${{{key}}}", str(value))
+
+        yaml_path = os.path.join(yaml_dir, f"flash-mpijob-{algorithm}-multi.yaml")
+        
+        try:
             with open(yaml_path, "w") as f:
                 f.write(yaml_str)
-            try:
-                kubectl = shutil.which("kubectl")
-                if kubectl is None:
-                    raise RuntimeError("kubectl not found in PATH")
-                else:
-                    print(f"[INFO] Submitting MPIJob: {algorithm} multi-machine, machines={machines}")
-                    subprocess.run([kubectl, "apply", "-f", yaml_path], check=True)
-                    subprocess.run([kubectl, "wait", "--for=condition=Succeeded", "mpijob/flash-mpijob", "--timeout=10m"], check=True)
-                    log_file = os.path.join(output_dir, f"flash_{algorithm}-{DATASET_NAME}-n{machines}-p32.log")
-                    subprocess.run([kubectl, "logs", "job/flash-mpijob-launcher"], stdout=open(log_file, "w"), check=True)
-                    subprocess.run([kubectl, "delete", "-f", yaml_path], check=True)
-            finally:
-                pass
+
+            kubectl = shutil.which("kubectl")
+            if kubectl is None:
+                raise RuntimeError("kubectl not found in PATH")
+            
+            print(f"[INFO] Submitting MPIJob: {algorithm} multi-machine, machines={machines}")
+            subprocess.run([kubectl, "apply", "-f", yaml_path], check=True)
+            subprocess.run([kubectl, "wait", "--for=condition=Succeeded", "mpijob/flash-mpijob", "--timeout=10m"], check=True)
+            dataset_name = os.path.basename(os.path.normpath(data_path))
+            log_file = os.path.join(output_dir, f"flash_{algorithm}-{dataset_name}-n{machines}-p32.log")
+            subprocess.run([kubectl, "logs", "job/flash-mpijob-launcher"], stdout=open(log_file, "w"), check=True)
+            subprocess.run([kubectl, "delete", "-f", yaml_path], check=True)
+        finally:
+            if os.path.exists(yaml_path):
                 os.remove(yaml_path)
+                pass
 
     print("[INFO] ✅ All experiments completed.")
 
-def run_ligra_perf(algorithm, data_path):
+
+def run_ligra_perf(algorithm, data_path=None):
     THREAD_LIST = [1, 2, 4, 8, 16, 32]
-    DATASETS = ["Standard", "Density", "Diameter"]
     MEMORY = "100Gi"
     CPU = "32"
-    yaml_dir = "kubectl-yaml"
-    os.makedirs(yaml_dir, exist_ok=True)
+    yaml_dir = "config"
+    template_path = os.path.join(yaml_dir, "ligra-mpijob-template.yaml")
 
     output_dir = "output"
     os.makedirs(output_dir, exist_ok=True)
 
-    for dataset in DATASETS:
-        if algorithm == "BellmanFord":
-            DATASET_NAME = f"ligra-sssp-adj-8-{dataset}.txt"
-        else:
-            DATASET_NAME = f"ligra-adj-8-{dataset}.txt"
-        for thread in THREAD_LIST:
-            params = {
-                "job_name": "ligra-mpijob",
-                "SLOTS_PER_WORKER": thread,
-                "HOST_PATH": data_path,
-                "CPU": CPU,
-                "MEMORY": MEMORY,
-                "REPLICAS": 1,
-                "MPIRUN_NP": thread,
-                "DATASET": DATASET_NAME,
-                "ALGORITHM": algorithm,
-                "SINGLE_MACHINE": 1,
-            }
-            yaml_str = render_mpijob_yaml("ligra", params)
-            
-            yaml_path = f"{yaml_dir}/{params['job_name']}-{algorithm}.yaml"
+    if algorithm == 'BellmanFord':
+        VOLUMES_BLOCK = f"volumes:\n          - name: ligra-data\n            hostPath:\n              path: {data_path}\n              type: File" if data_path else ""
+        VOLUME_MOUNTS_BLOCK = f"volumeMounts:\n            - name: ligra-data\n              mountPath: /opt/data/graph_sssp.txt" if data_path else ""
+    else:
+        VOLUMES_BLOCK = f"volumes:\n          - name: ligra-data\n            hostPath:\n              path: {data_path}\n              type: File" if data_path else ""
+        VOLUME_MOUNTS_BLOCK = f"volumeMounts:\n            - name: ligra-data\n              mountPath: /opt/data/graph.txt" if data_path else ""
+    
+
+
+    try:
+        with open(template_path, 'r') as f:
+            template_str = f.read()
+    except FileNotFoundError:
+        print(f"[ERROR] Template file not found: {template_path}")
+        return
+
+    for thread in THREAD_LIST:
+        params = {
+            "SLOTS_PER_WORKER": thread,
+            "HOST_PATH": data_path,
+            "CPU": CPU,
+            "MEMORY": MEMORY,
+            "REPLICAS": 1,
+            "MPIRUN_NP": thread,
+            "ALGORITHM": algorithm,
+            "SINGLE_MACHINE": 1,
+            "VOLUMES_BLOCK": VOLUMES_BLOCK,
+            "VOLUME_MOUNTS_BLOCK": VOLUME_MOUNTS_BLOCK,
+        }
+        yaml_str = template_str
+        for key, value in params.items():
+            yaml_str = yaml_str.replace(f"${{{key}}}", str(value))
+
+        yaml_path = os.path.join(yaml_dir, f"ligra-mpijob-{algorithm}-single.yaml")
+        try:
             with open(yaml_path, "w") as f:
                 f.write(yaml_str)
-            try:
-                kubectl = shutil.which("kubectl")
-                if kubectl is None:
-                    raise RuntimeError("kubectl not found in PATH")
-                else:
-                    print(f"[INFO] Submitting Ligra MPIJob: {algorithm} threads={thread}")
-                    subprocess.run([kubectl, "apply", "-f", yaml_path], check=True)
-                    subprocess.run([kubectl, "wait", "--for=condition=Succeeded", "mpijob/ligra-mpijob", "--timeout=10m"], check=True)
-                    log_file = os.path.join(output_dir, f"ligra_{algorithm}-{DATASET_NAME}-n1-p{thread}.log")
-                    subprocess.run([kubectl, "logs", "job/ligra-mpijob-launcher"], stdout=open(log_file, "w"), check=True)
-                    subprocess.run([kubectl, "delete", "-f", yaml_path], check=True)
-            finally:
+            kubectl = shutil.which("kubectl")
+            if kubectl is None:
+                raise RuntimeError("kubectl not found in PATH")
+            print(f"[INFO] Submitting Ligra MPIJob: {algorithm} threads={thread}")
+            subprocess.run([kubectl, "apply", "-f", yaml_path], check=True)
+            subprocess.run([kubectl, "wait", "--for=condition=Succeeded", "mpijob/ligra-mpijob", "--timeout=10m"], check=True)
+            log_file = os.path.join(output_dir, f"ligra_{algorithm}-n1-p{thread}.log")
+            subprocess.run([kubectl, "logs", "job/ligra-mpijob-launcher"], stdout=open(log_file, "w"), check=True)
+            subprocess.run([kubectl, "delete", "-f", yaml_path], check=True)
+        finally:
+            if os.path.exists(yaml_path):
+                os.remove(yaml_path)
                 pass
 
     print("[INFO] ✅ Ligra experiments completed.")
 
-def run_grape_perf(algorithm, data_path):
+def run_grape_perf(algorithm, data_path=None):
     THREAD_LIST = [1, 2, 4, 8, 16, 32]
     MACHINE_LIST = [2, 4, 8, 16]
-    DATASETS = ["Standard", "Density", "Diameter"]
     MEMORY = "100Gi"
     CPU = "32"
-    yaml_dir = "kubectl-yaml"
-    os.makedirs(yaml_dir, exist_ok=True)
+    yaml_dir = "config"
+    template_path = os.path.join(yaml_dir, "grape-mpijob-template.yaml")
 
     output_dir = "output"
     os.makedirs(output_dir, exist_ok=True)
 
-    for dataset in DATASETS:
-        if algorithm == "sssp":
-            DATASET_NAME = f"grape-sssp-edges-8-{dataset}"
-        else:
-            DATASET_NAME = f"grape-edges-8-{dataset}"
-        for thread in THREAD_LIST:
-            params = {
-                "job_name": "grape-mpijob",
-                "SLOTS_PER_WORKER": thread,
-                "HOST_PATH": data_path,
-                "CPU": CPU,
-                "MEMORY": MEMORY,
-                "REPLICAS": 1,
-                "MPIRUN_NP": thread,
-                "DATASET": DATASET_NAME,
-                "ALGORITHM": algorithm,
-                "SINGLE_MACHINE": 1,
-            }
-            yaml_str = render_mpijob_yaml("grape", params)
-            yaml_path = f"{yaml_dir}/{params['job_name']}-{algorithm}.yaml"
+    if algorithm == 'sssp':
+        VOLUMES_BLOCK = f"volumes:\n          - name: grape-data-v\n            hostPath:\n              path: {data_path}.v\n              type: File\n          - name: grape-data-e\n            hostPath:\n              path: {data_path}.e\n              type: File" if data_path else ""
+        VOLUME_MOUNTS_BLOCK = f"volumeMounts:\n            - name: grape-data-v\n              mountPath: /opt/data/graph_sssp.v\n            - name: grape-data-e\n              mountPath: /opt/data/graph_sssp.e" if data_path else ""
+
+    else:
+        VOLUMES_BLOCK = f"volumes:\n          - name: grape-data-v\n            hostPath:\n              path: {data_path}.v\n              type: File\n          - name: grape-data-e\n            hostPath:\n              path: {data_path}.e\n              type: File" if data_path else ""
+        VOLUME_MOUNTS_BLOCK = f"volumeMounts:\n            - name: grape-data-v\n              mountPath: /opt/data/graph.v\n            - name: grape-data-e\n              mountPath: /opt/data/graph.e" if data_path else ""
+
+
+    try:
+        with open(template_path, 'r') as f:
+            template_str = f.read()
+    except FileNotFoundError:
+        print(f"[ERROR] Template file not found: {template_path}")
+        return
+
+    for thread in THREAD_LIST:
+        params = {
+            "SLOTS_PER_WORKER": thread,
+            "HOST_PATH_V": data_path+".v",
+            "HOST_PATH_E": data_path+".e",
+            "CPU": CPU,
+            "MEMORY": MEMORY,
+            "REPLICAS": 1,
+            "MPIRUN_NP": thread,
+            "ALGORITHM": algorithm,
+            "SINGLE_MACHINE": 1,
+            "VOLUMES_BLOCK": VOLUMES_BLOCK,
+            "VOLUME_MOUNTS_BLOCK": VOLUME_MOUNTS_BLOCK,
+        }
+        yaml_str = template_str
+        for key, value in params.items():
+            yaml_str = yaml_str.replace(f"${{{key}}}", str(value))
+
+        yaml_path = os.path.join(yaml_dir, f"grape-mpijob-{algorithm}-single.yaml")
+        try:
             with open(yaml_path, "w") as f:
                 f.write(yaml_str)
-            try:
-                kubectl = shutil.which("kubectl")
-                if kubectl is None:
-                    raise RuntimeError("kubectl not found in PATH")
-                else:
-                    print(f"[INFO] Submitting Grape MPIJob: {algorithm} single-machine, threads={thread}")
-                    subprocess.run([kubectl, "apply", "-f", yaml_path], check=True)
-                    subprocess.run([kubectl, "wait", "--for=condition=Succeeded", "mpijob/grape-mpijob", "--timeout=10m"], check=True)
-                    log_file = os.path.join(output_dir, f"grape_{algorithm}-{DATASET_NAME}-n1-p{thread}.log")
-                    subprocess.run([kubectl, "logs", "job/grape-mpijob-launcher"], stdout=open(log_file, "w"), check=True)
-                    subprocess.run([kubectl, "delete", "-f", yaml_path], check=True)
-            finally:
+            kubectl = shutil.which("kubectl")
+            if kubectl is None:
+                raise RuntimeError("kubectl not found in PATH")
+            print(f"[INFO] Submitting MPIJob: {algorithm} single-machine, threads={thread}")
+            subprocess.run([kubectl, "apply", "-f", yaml_path], check=True)
+            subprocess.run([kubectl, "wait", "--for=condition=Succeeded", "mpijob/grape-mpijob", "--timeout=10m"], check=True)
+            log_file = os.path.join(output_dir, f"grape_{algorithm}-n1-p{thread}.log")
+            subprocess.run([kubectl, "logs", "job/grape-mpijob-launcher"], stdout=open(log_file, "w"), check=True)
+            subprocess.run([kubectl, "delete", "-f", yaml_path], check=True)
+        finally:
+            if os.path.exists(yaml_path):
+                os.remove(yaml_path)
                 pass
 
+    for machines in MACHINE_LIST:
+        params = {
+            "SLOTS_PER_WORKER": 32,
+            "HOST_PATH_V": data_path+".v",
+            "HOST_PATH_E": data_path+".e",
+            "CPU": CPU,
+            "MEMORY": MEMORY,
+            "REPLICAS": machines,
+            "MPIRUN_NP": machines * 32,
+            "ALGORITHM": algorithm,
+            "SINGLE_MACHINE": 0,
+            "VOLUMES_BLOCK": VOLUMES_BLOCK,
+            "VOLUME_MOUNTS_BLOCK": VOLUME_MOUNTS_BLOCK,
+        }
+        yaml_str = template_str
+        for key, value in params.items():
+            yaml_str = yaml_str.replace(f"${{{key}}}", str(value))
 
-    for dataset in DATASETS:
-        if algorithm == "sssp":
-            DATASET_NAME = f"grape-sssp-edges-9-{dataset}"
-        else:
-            DATASET_NAME = f"grape-edges-9-{dataset}"
-        for machines in MACHINE_LIST:
-            params = {
-                "job_name": "grape-mpijob",
-                "SLOTS_PER_WORKER": 32,
-                "HOST_PATH": data_path,
-                "CPU": CPU,
-                "MEMORY": MEMORY,
-                "REPLICAS": machines,
-                "MPIRUN_NP": machines * 32,
-                "DATASET": DATASET_NAME,
-                "ALGORITHM": algorithm,
-                "SINGLE_MACHINE": 0,
-            }
-            yaml_str = render_mpijob_yaml("grape", params)
-            yaml_path = f"{yaml_dir}/{params['job_name']}-{algorithm}.yaml"
+        yaml_path = os.path.join(yaml_dir, f"grape-mpijob-{algorithm}-multi.yaml")
+        try:
             with open(yaml_path, "w") as f:
                 f.write(yaml_str)
-            try:
-                kubectl = shutil.which("kubectl")
-                if kubectl is None:
-                    raise RuntimeError("kubectl not found in PATH")
-                else:
-                    print(f"[INFO] Submitting Grape MPIJob: {algorithm} multi-machine, machines={machines}")
-                    subprocess.run([kubectl, "apply", "-f", yaml_path], check=True)
-                    subprocess.run([kubectl, "wait", "--for=condition=Succeeded", "mpijob/grape-mpijob", "--timeout=10m"], check=True)
-                    log_file = os.path.join(output_dir, f"grape_{algorithm}-{DATASET_NAME}-n{machines}-p32.log")
-                    subprocess.run([kubectl, "logs", "job/grape-mpijob-launcher"], stdout=open(log_file, "w"), check=True)
-                    subprocess.run([kubectl, "delete", "-f", yaml_path], check=True)
-            finally:
+            kubectl = shutil.which("kubectl")
+            if kubectl is None:
+                raise RuntimeError("kubectl not found in PATH")
+            print(f"[INFO] Submitting MPIJob: {algorithm} multi-machine, machines={machines}")
+            subprocess.run([kubectl, "apply", "-f", yaml_path], check=True)
+            subprocess.run([kubectl, "wait", "--for=condition=Succeeded", "mpijob/grape-mpijob", "--timeout=10m"], check=True)
+            log_file = os.path.join(output_dir, f"grape_{algorithm}-n{machines}-p32.log")
+            subprocess.run([kubectl, "logs", "job/grape-mpijob-launcher"], stdout=open(log_file, "w"), check=True)
+            subprocess.run([kubectl, "delete", "-f", yaml_path], check=True)
+        finally:
+            if os.path.exists(yaml_path):
+                os.remove(yaml_path)
                 pass
 
     print("[INFO] ✅ Grape experiments completed.")
 
-def run_pregel_perf(algorithm, data_path):
+def run_pregel_perf(algorithm, data_path=None):
     THREAD_LIST = [1, 2, 4, 8, 16, 32]
     MACHINE_LIST = [2, 4, 8, 16]
-    DATASETS = ["Standard", "Density", "Diameter"]
     MEMORY = "100Gi"
     CPU = "32"
-    yaml_dir = "kubectl-yaml"
-    os.makedirs(yaml_dir, exist_ok=True)
+    yaml_dir = "config"
+    template_path = os.path.join(yaml_dir, "pregel-mpijob-template.yaml")
 
     output_dir = "output"
     os.makedirs(output_dir, exist_ok=True)
 
-    for dataset in DATASETS:
-        if algorithm == "sssp":
-            DATASET_NAME = f"pregel+-adj-8-{dataset}.txt"
-        else:
-            DATASET_NAME = f"pregel+-adj-8-{dataset}.txt"
-        for thread in THREAD_LIST:
-            params = {
-                "job_name": "pregel-mpijob",
-                "SLOTS_PER_WORKER": thread,
-                "HOST_PATH": data_path,
-                "CPU": CPU,
-                "MEMORY": MEMORY,
-                "REPLICAS": 1,
-                "MPIRUN_NP": thread,
-                "DATASET": DATASET_NAME,
-                "ALGORITHM": algorithm,
-                "SINGLE_MACHINE": 1,
-            }
-            yaml_str = render_mpijob_yaml("pregel+", params)
-            yaml_path = f"{yaml_dir}/{params['job_name']}-{algorithm}.yaml"
+    VOLUMES_BLOCK = f"- name: pregeldata\n              hostPath:\n                path: {data_path}\n                type: File" if data_path else ""
+    VOLUME_MOUNTS_BLOCK = f"- name: pregeldata\n                  mountPath: /opt/data/graph.txt" if data_path else ""
+
+
+    for thread in THREAD_LIST:
+        params = {
+            "SLOTS_PER_WORKER": thread,
+            "HOST_PATH": data_path,
+            "CPU": CPU,
+            "MEMORY": MEMORY,
+            "REPLICAS": 1,
+            "MPIRUN_NP": thread,
+            "ALGORITHM": algorithm,
+            "SINGLE_MACHINE": 1,
+            "VOLUMES_BLOCK": VOLUMES_BLOCK,
+            "VOLUME_MOUNTS_BLOCK": VOLUME_MOUNTS_BLOCK,
+        }
+        try:
+            with open(template_path, 'r') as f:
+                template_str = f.read()
+        except FileNotFoundError:
+            print(f"[ERROR] Template file not found: {template_path}")
+            return
+
+        yaml_str = template_str
+        for key, value in params.items():
+            yaml_str = yaml_str.replace(f"${{{key}}}", str(value))
+
+        yaml_path = os.path.join(yaml_dir, f"pregel-mpijob-{algorithm}-single.yaml")
+        try:
             with open(yaml_path, "w") as f:
                 f.write(yaml_str)
-            try:
-                kubectl = shutil.which("kubectl")
-                if kubectl is None:
-                    raise RuntimeError("kubectl not found in PATH")
-                else:
-                    print(f"[INFO] Submitting Pregel+ MPIJob: {algorithm} single-machine, threads={thread}")
-                    subprocess.run([kubectl, "-n", "hadoop", "apply", "-f", yaml_path], check=True)
-                    subprocess.run([kubectl, "-n", "hadoop", "wait", "--for=condition=Succeeded", "mpijob/pregel-mpijob", "--timeout=10m"], check=True)
-                    log_file = os.path.join(output_dir, f"pregel_{algorithm}-{DATASET_NAME}-n1-p{thread}.log")
-                    subprocess.run([kubectl, "-n", "hadoop", "logs", "job/pregel-mpijob-launcher"], stdout=open(log_file, "w"), check=True)
-                    subprocess.run([kubectl, "-n", "hadoop", "delete", "-f", yaml_path], check=True)
-            finally:
+            kubectl = shutil.which("kubectl")
+            if kubectl is None:
+                raise RuntimeError("kubectl not found in PATH")
+            print(f"[INFO] Submitting Pregel+ MPIJob: {algorithm} single-machine, threads={thread}")
+            subprocess.run([kubectl, "apply", "-f", yaml_path], check=True)
+            subprocess.run([kubectl, "wait", "--for=condition=Succeeded", "mpijob/pregel-mpijob", "--timeout=10m"], check=True)
+            log_file = os.path.join(output_dir, f"pregel_{algorithm}-n1-p{thread}.log")
+            subprocess.run([kubectl, "logs", "job/pregel-mpijob-launcher"], stdout=open(log_file, "w"), check=True)
+            subprocess.run([kubectl, "delete", "-f", yaml_path], check=True)
+        finally:
+            if os.path.exists(yaml_path):
+                os.remove(yaml_path)
                 pass
 
+    for machines in MACHINE_LIST:
+        params = {
+            "SLOTS_PER_WORKER": 32,
+            "HOST_PATH": data_path,
+            "CPU": CPU,
+            "MEMORY": MEMORY,
+            "REPLICAS": machines,
+            "MPIRUN_NP": machines * 32,
+            "ALGORITHM": algorithm,
+            "SINGLE_MACHINE": 0,
+            "VOLUMES_BLOCK": VOLUMES_BLOCK,
+            "VOLUME_MOUNTS_BLOCK": VOLUME_MOUNTS_BLOCK,
+        }
+        try:
+            with open(template_path, 'r') as f:
+                template_str = f.read()
+        except FileNotFoundError:
+            print(f"[ERROR] Template file not found: {template_path}")
+            return
 
-    for dataset in DATASETS:
-        if algorithm == "sssp":
-            DATASET_NAME = f"pregel+-adj-9-{dataset}.txt"
-        else:
-            DATASET_NAME = f"pregel+-adj-9-{dataset}.txt"
-        for machines in MACHINE_LIST:
-            params = {
-                "job_name": "pregel-mpijob",
-                "SLOTS_PER_WORKER": 32,
-                "HOST_PATH": data_path,
-                "CPU": CPU,
-                "MEMORY": MEMORY,
-                "REPLICAS": machines,
-                "MPIRUN_NP": machines * 32,
-                "DATASET": DATASET_NAME,
-                "ALGORITHM": algorithm,
-                "SINGLE_MACHINE": 0,
-            }
-            yaml_str = render_mpijob_yaml("pregel+", params)
-            yaml_path = f"{yaml_dir}/{params['job_name']}-{algorithm}.yaml"
+        yaml_str = template_str
+        for key, value in params.items():
+            yaml_str = yaml_str.replace(f"${{{key}}}", str(value))
+
+        yaml_path = os.path.join(yaml_dir, f"pregel-mpijob-{algorithm}-multi.yaml")
+        try:
             with open(yaml_path, "w") as f:
                 f.write(yaml_str)
-            try:
-                kubectl = shutil.which("kubectl")
-                if kubectl is None:
-                    raise RuntimeError("kubectl not found in PATH")
-                else:
-                    print(f"[INFO] Submitting Pregel+ MPIJob: {algorithm} multi-machine, machines={machines}")
-                    subprocess.run([kubectl, "-n", "hadoop", "apply", "-f", yaml_path], check=True)
-                    subprocess.run([kubectl, "-n", "hadoop", "wait", "--for=condition=Succeeded", "mpijob/pregel-mpijob", "--timeout=10m"], check=True)
-                    log_file = os.path.join(output_dir, f"pregel_{algorithm}-{DATASET_NAME}-n{machines}-p32.log")
-                    subprocess.run([kubectl, "-n", "hadoop", "logs", "job/pregel-mpijob-launcher"], stdout=open(log_file, "w"), check=True)
-                    subprocess.run([kubectl, "-n", "hadoop", "delete", "-f", yaml_path], check=True)
-            finally:
+            kubectl = shutil.which("kubectl")
+            if kubectl is None:
+                raise RuntimeError("kubectl not found in PATH")
+            print(f"[INFO] Submitting Pregel+ MPIJob: {algorithm} multi-machine, machines={machines}")
+            subprocess.run([kubectl, "apply", "-f", yaml_path], check=True)
+            subprocess.run([kubectl, "wait", "--for=condition=Succeeded", "mpijob/pregel-mpijob", "--timeout=10m"], check=True)
+            log_file = os.path.join(output_dir, f"pregel_{algorithm}-n{machines}-p32.log")
+            subprocess.run([kubectl, "logs", "job/pregel-mpijob-launcher"], stdout=open(log_file, "w"), check=True)
+            subprocess.run([kubectl, "delete", "-f", yaml_path], check=True)
+        finally:
+            if os.path.exists(yaml_path):
+                os.remove(yaml_path)
                 pass
 
     print("[INFO] ✅ Pregel+ experiments completed.")
 
-def run_gthinker_perf(algorithm, data_path):
+def run_gthinker_perf(algorithm, data_path=None):
     THREAD_LIST = [1, 2, 4, 8, 16, 32]
     MACHINE_LIST = [2, 4, 8, 16]
-    DATASETS = ["Standard", "Density", "Diameter"]
     MEMORY = "100Gi"
     CPU = "32"
-    yaml_dir = "kubectl-yaml"
-    os.makedirs(yaml_dir, exist_ok=True)
+    yaml_dir = "config"
+    template_path = os.path.join(yaml_dir, "gthinker-mpijob-template.yaml")
 
     output_dir = "output"
     os.makedirs(output_dir, exist_ok=True)
 
-    for dataset in DATASETS:
-        if algorithm == "sssp":
-            DATASET_NAME = f"gthinker-adj-8-{dataset}.txt"
-        else:
-            DATASET_NAME = f"gthinker-adj-8-{dataset}.txt"
-        for thread in THREAD_LIST:
-            params = {
-                "job_name": "gthinker-mpijob",
-                "SLOTS_PER_WORKER": thread,
-                "HOST_PATH": data_path,
-                "CPU": CPU,
-                "MEMORY": MEMORY,
-                "REPLICAS": 1,
-                "MPIRUN_NP": thread,
-                "DATASET": DATASET_NAME,
-                "ALGORITHM": algorithm,
-                "SINGLE_MACHINE": 1,
-            }
-            yaml_str = render_mpijob_yaml("gthinker", params)
-            yaml_path = f"{yaml_dir}/{params['job_name']}-{algorithm}.yaml"
+
+    VOLUMES_BLOCK = f"- name: gthinkerdata\n              hostPath:\n                path: {data_path}\n                type: File" if data_path else ""
+    VOLUME_MOUNTS_BLOCK = f"- name: gthinkerdata\n                  mountPath: /opt/data/graph.txt" if data_path else ""
+
+
+    for thread in THREAD_LIST:
+        params = {
+            "SLOTS_PER_WORKER": thread,
+            "HOST_PATH": data_path,
+            "CPU": CPU,
+            "MEMORY": MEMORY,
+            "REPLICAS": 1,
+            "MPIRUN_NP": thread,
+            "ALGORITHM": algorithm,
+            "SINGLE_MACHINE": 1,
+            "VOLUMES_BLOCK": VOLUMES_BLOCK,
+            "VOLUME_MOUNTS_BLOCK": VOLUME_MOUNTS_BLOCK,
+        }
+        try:
+            with open(template_path, 'r') as f:
+                template_str = f.read()
+        except FileNotFoundError:
+            print(f"[ERROR] Template file not found: {template_path}")
+            return
+
+        yaml_str = template_str
+        for key, value in params.items():
+            yaml_str = yaml_str.replace(f"${{{key}}}", str(value))
+
+        yaml_path = os.path.join(yaml_dir, f"gthinker-mpijob-{algorithm}-single.yaml")
+        try:
             with open(yaml_path, "w") as f:
                 f.write(yaml_str)
-            try:
-                kubectl = shutil.which("kubectl")
-                if kubectl is None:
-                    raise RuntimeError("kubectl not found in PATH")
-                else:
-                    print(f"[INFO] Submitting Gthinker MPIJob: {algorithm} single-machine, threads={thread}")
-                    subprocess.run([kubectl, "-n", "hadoop", "apply", "-f", yaml_path], check=True)
-                    subprocess.run([kubectl, "-n", "hadoop", "wait", "--for=condition=Succeeded", "mpijob/gthinker-mpijob", "--timeout=10m"], check=True)
-                    log_file = os.path.join(output_dir, f"gthinker_{algorithm}-{DATASET_NAME}-n1-p{thread}.log")
-                    subprocess.run([kubectl, "-n", "hadoop", "logs", "job/gthinker-mpijob-launcher"], stdout=open(log_file, "w"), check=True)
-                    subprocess.run([kubectl, "-n", "hadoop", "delete", "-f", yaml_path], check=True)
-            finally:
+            kubectl = shutil.which("kubectl")
+            if kubectl is None:
+                raise RuntimeError("kubectl not found in PATH")
+            print(f"[INFO] Submitting Gthinker MPIJob: {algorithm} single-machine, threads={thread}")
+            subprocess.run([kubectl, "apply", "-f", yaml_path], check=True)
+            subprocess.run([kubectl, "wait", "--for=condition=Succeeded", "mpijob/gthinker-mpijob", "--timeout=10m"], check=True)
+            log_file = os.path.join(output_dir, f"gthinker_{algorithm}-n1-p{thread}.log")
+            subprocess.run([kubectl, "logs", "job/gthinker-mpijob-launcher"], stdout=open(log_file, "w"), check=True)
+            subprocess.run([kubectl, "delete", "-f", yaml_path], check=True)
+        finally:
+            if os.path.exists(yaml_path):
+                os.remove(yaml_path)
                 pass
 
+    for machines in MACHINE_LIST:
+        params = {
+            "SLOTS_PER_WORKER": 32,
+            "HOST_PATH": data_path,
+            "CPU": CPU,
+            "MEMORY": MEMORY,
+            "REPLICAS": machines,
+            "MPIRUN_NP": machines * 32,
+            "ALGORITHM": algorithm,
+            "SINGLE_MACHINE": 0,
+            "VOLUMES_BLOCK": VOLUMES_BLOCK,
+            "VOLUME_MOUNTS_BLOCK": VOLUME_MOUNTS_BLOCK,
+        }
+        try:
+            with open(template_path, 'r') as f:
+                template_str = f.read()
+        except FileNotFoundError:
+            print(f"[ERROR] Template file not found: {template_path}")
+            return
 
-    for dataset in DATASETS:
-        if algorithm == "sssp":
-            DATASET_NAME = f"gthinker-adj-9-{dataset}.txt"
-        else:
-            DATASET_NAME = f"gthinker-adj-9-{dataset}.txt"
-        for machines in MACHINE_LIST:
-            params = {
-                "job_name": "gthinker-mpijob",
-                "SLOTS_PER_WORKER": 32,
-                "HOST_PATH": data_path,
-                "CPU": CPU,
-                "MEMORY": MEMORY,
-                "REPLICAS": machines,
-                "MPIRUN_NP": machines * 32,
-                "DATASET": DATASET_NAME,
-                "ALGORITHM": algorithm,
-                "SINGLE_MACHINE": 0,
-            }
-            yaml_str = render_mpijob_yaml("gthinker", params)
-            yaml_path = f"{yaml_dir}/{params['job_name']}-{algorithm}.yaml"
+        yaml_str = template_str
+        for key, value in params.items():
+            yaml_str = yaml_str.replace(f"${{{key}}}", str(value))
+
+        yaml_path = os.path.join(yaml_dir, f"gthinker-mpijob-{algorithm}-multi.yaml")
+        try:
             with open(yaml_path, "w") as f:
                 f.write(yaml_str)
-            try:
-                kubectl = shutil.which("kubectl")
-                if kubectl is None:
-                    raise RuntimeError("kubectl not found in PATH")
-                else:
-                    print(f"[INFO] Submitting Gthinker MPIJob: {algorithm} multi-machine, machines={machines}")
-                    subprocess.run([kubectl, "-n", "hadoop", "apply", "-f", yaml_path], check=True)
-                    subprocess.run([kubectl, "-n", "hadoop", "wait", "--for=condition=Succeeded", "mpijob/gthinker-mpijob", "--timeout=10m"], check=True)
-                    log_file = os.path.join(output_dir, f"gthinker_{algorithm}-{DATASET_NAME}-n{machines}-p32.log")
-                    subprocess.run([kubectl, "-n", "hadoop", "logs", "job/gthinker-mpijob-launcher"], stdout=open(log_file, "w"), check=True)
-                    subprocess.run([kubectl, "-n", "hadoop", "delete", "-f", yaml_path], check=True)
-            finally:
+            kubectl = shutil.which("kubectl")
+            if kubectl is None:
+                raise RuntimeError("kubectl not found in PATH")
+            print(f"[INFO] Submitting Gthinker MPIJob: {algorithm} multi-machine, machines={machines}")
+            subprocess.run([kubectl, "apply", "-f", yaml_path], check=True)
+            subprocess.run([kubectl, "wait", "--for=condition=Succeeded", "mpijob/gthinker-mpijob", "--timeout=10m"], check=True)
+            log_file = os.path.join(output_dir, f"gthinker_{algorithm}-n{machines}-p32.log")
+            subprocess.run([kubectl, "logs", "job/gthinker-mpijob-launcher"], stdout=open(log_file, "w"), check=True)
+            subprocess.run([kubectl, "delete", "-f", yaml_path], check=True)
+        finally:
+            if os.path.exists(yaml_path):
+                os.remove(yaml_path)
                 pass
 
     print("[INFO] ✅ Gthinker experiments completed.")
 
-def run_powergraph_perf(algorithm, data_path):
+def run_powergraph_perf(algorithm, data_path=None):
     THREAD_LIST = [1, 2, 4, 8, 16, 32]
     MACHINE_LIST = [2, 4, 8, 16]
-    DATASETS = ["Standard", "Diameter", "Density"]
     MEMORY = "100Gi"
     CPU = "32"
-    yaml_dir = "kubectl-yaml"
-    os.makedirs(yaml_dir, exist_ok=True)
+    yaml_dir = "config"
+    template_path = os.path.join(yaml_dir, "powergraph-mpijob-template.yaml")
 
     output_dir = "output"
     os.makedirs(output_dir, exist_ok=True)
 
-    for dataset in DATASETS:
-        DATASET_NAME = f"graphlab-adj-8-{dataset}.txt"
-        for thread in THREAD_LIST:
-            params = {
-                "job_name": "graphlab-mpijob",
-                "SLOTS_PER_WORKER": thread,
-                "HOST_PATH": data_path,
-                "CPU": CPU,
-                "MEMORY": MEMORY,
-                "REPLICAS": 1,
-                "MPIRUN_NP": thread,
-                "DATASET": DATASET_NAME,
-                "ALGORITHM": algorithm,
-                "SINGLE_MACHINE": 1,
-            }
-            yaml_str = render_mpijob_yaml("powergraph", params)
-            yaml_path = f"{yaml_dir}/{params['job_name']}-{algorithm}.yaml"
+    VOLUMES_BLOCK = f"- name: graphlabdata\n              hostPath:\n                path: {data_path}\n                type: File" if data_path else ""
+    VOLUME_MOUNTS_BLOCK = f"- name: graphlabdata\n                  mountPath: /opt/data/graph.txt" if data_path else ""
+
+
+    for thread in THREAD_LIST:
+        params = {
+            "SLOTS_PER_WORKER": thread,
+            "HOST_PATH": data_path,
+            "CPU": CPU,
+            "MEMORY": MEMORY,
+            "REPLICAS": 1,
+            "MPIRUN_NP": thread,
+            "ALGORITHM": algorithm,
+            "SINGLE_MACHINE": 1,
+            "VOLUMES_BLOCK": VOLUMES_BLOCK,
+            "VOLUME_MOUNTS_BLOCK": VOLUME_MOUNTS_BLOCK,
+        }
+        try:
+            with open(template_path, 'r') as f:
+                template_str = f.read()
+        except FileNotFoundError:
+            print(f"[ERROR] Template file not found: {template_path}")
+            return
+
+        yaml_str = template_str
+        for key, value in params.items():
+            yaml_str = yaml_str.replace(f"${{{key}}}", str(value))
+
+        yaml_path = os.path.join(yaml_dir, f"powergraph-mpijob-{algorithm}-single.yaml")
+        try:
             with open(yaml_path, "w") as f:
                 f.write(yaml_str)
-            try:
-                kubectl = shutil.which("kubectl")
-                if kubectl is None:
-                    raise RuntimeError("kubectl not found in PATH")
-                else:
-                    print(f"[INFO] Submitting PowerGraph MPIJob: {algorithm} single-machine, threads={thread}")
-                    subprocess.run([kubectl, "-n", "hadoop", "apply", "-f", yaml_path], check=True)
-                    subprocess.run([kubectl, "-n", "hadoop", "wait", "--for=condition=Succeeded", "mpijob/graphlab-mpijob", "--timeout=10m"], check=True)
-                    log_file = os.path.join(output_dir, f"powergraph_{algorithm}-{DATASET_NAME}-n1-p{thread}.log")
-                    subprocess.run([kubectl, "-n", "hadoop", "logs", "job/graphlab-mpijob-launcher"], stdout=open(log_file, "w"), check=True)
-                    subprocess.run([kubectl, "-n", "hadoop", "delete", "-f", yaml_path], check=True)
-            finally:
+            kubectl = shutil.which("kubectl")
+            if kubectl is None:
+                raise RuntimeError("kubectl not found in PATH")
+            print(f"[INFO] Submitting PowerGraph MPIJob: {algorithm} single-machine, threads={thread}")
+            subprocess.run([kubectl, "apply", "-f", yaml_path], check=True)
+            subprocess.run([kubectl, "wait", "--for=condition=Succeeded", "mpijob/powergraph-mpijob", "--timeout=10m"], check=True)
+            log_file = os.path.join(output_dir, f"powergraph_{algorithm}-n1-p{thread}.log")
+            subprocess.run([kubectl, "logs", "job/powergraph-mpijob-launcher"], stdout=open(log_file, "w"), check=True)
+            subprocess.run([kubectl, "delete", "-f", yaml_path], check=True)
+        finally:
+            if os.path.exists(yaml_path):
+                os.remove(yaml_path)
                 pass
 
+    for machines in MACHINE_LIST:
+        params = {
+            "SLOTS_PER_WORKER": 32,
+            "HOST_PATH": data_path,
+            "CPU": CPU,
+            "MEMORY": MEMORY,
+            "REPLICAS": machines,
+            "MPIRUN_NP": machines * 32,
+            "ALGORITHM": algorithm,
+            "SINGLE_MACHINE": 0,
+            "VOLUMES_BLOCK": VOLUMES_BLOCK,
+            "VOLUME_MOUNTS_BLOCK": VOLUME_MOUNTS_BLOCK,
+        }
+        try:
+            with open(template_path, 'r') as f:
+                template_str = f.read()
+        except FileNotFoundError:
+            print(f"[ERROR] Template file not found: {template_path}")
+            return
 
-    for dataset in DATASETS:
-        DATASET_NAME = f"graphlab-adj-9-{dataset}.txt"
-        for machines in MACHINE_LIST:
-            params = {
-                "job_name": "graphlab-mpijob",
-                "SLOTS_PER_WORKER": 32,
-                "HOST_PATH": data_path,
-                "CPU": CPU,
-                "MEMORY": MEMORY,
-                "REPLICAS": machines,
-                "MPIRUN_NP": machines * 32,
-                "DATASET": DATASET_NAME,
-                "ALGORITHM": algorithm,
-                "SINGLE_MACHINE": 0,
-            }
-            yaml_str = render_mpijob_yaml("powergraph", params)
-            yaml_path = f"{yaml_dir}/{params['job_name']}-{algorithm}.yaml"
+        yaml_str = template_str
+        for key, value in params.items():
+            yaml_str = yaml_str.replace(f"${{{key}}}", str(value))
+
+        yaml_path = os.path.join(yaml_dir, f"powergraph-mpijob-{algorithm}-multi.yaml")
+        try:
             with open(yaml_path, "w") as f:
                 f.write(yaml_str)
-            try:
-                kubectl = shutil.which("kubectl")
-                if kubectl is None:
-                    raise RuntimeError("kubectl not found in PATH")
-                else:
-                    print(f"[INFO] Submitting PowerGraph MPIJob: {algorithm} multi-machine, machines={machines}")
-                    subprocess.run([kubectl, "-n", "hadoop", "apply", "-f", yaml_path], check=True)
-                    subprocess.run([kubectl, "-n", "hadoop", "wait", "--for=condition=Succeeded", "mpijob/graphlab-mpijob", "--timeout=10m"], check=True)
-                    log_file = os.path.join(output_dir, f"powergraph_{algorithm}-{DATASET_NAME}-n{machines}-p32.log")
-                    subprocess.run([kubectl, "-n", "hadoop", "logs", "job/graphlab-mpijob-launcher"], stdout=open(log_file, "w"), check=True)
-                    subprocess.run([kubectl, "-n", "hadoop", "delete", "-f", yaml_path], check=True)
-            finally:
-                os.remove(yaml_path) 
+            kubectl = shutil.which("kubectl")
+            if kubectl is None:
+                raise RuntimeError("kubectl not found in PATH")
+            print(f"[INFO] Submitting PowerGraph MPIJob: {algorithm} multi-machine, machines={machines}")
+            subprocess.run([kubectl, "apply", "-f", yaml_path], check=True)
+            subprocess.run([kubectl, "wait", "--for=condition=Succeeded", "mpijob/powergraph-mpijob", "--timeout=10m"], check=True)
+            log_file = os.path.join(output_dir, f"powergraph_{algorithm}-n{machines}-p32.log")
+            subprocess.run([kubectl, "logs", "job/powergraph-mpijob-launcher"], stdout=open(log_file, "w"), check=True)
+            subprocess.run([kubectl, "delete", "-f", yaml_path], check=True)
+        finally:
+            if os.path.exists(yaml_path):
+                os.remove(yaml_path)
+                pass
 
     print("[INFO] ✅ PowerGraph experiments completed.")
 
@@ -579,9 +683,17 @@ def data_generator(scale, platform, feature, compile):
     generator_exe = "./generator"
 
     if not os.path.exists(os.path.join(generator_dir, "FFT-DG.cpp")):
-        click.secho(f"Error: '{generator_dir}/FFT-DG.cpp' not found. Please ensure Data_Generator.zip is unzipped.",
-                    fg="red")
-        return
+        click.secho(f"'{generator_dir}/FFT-DG.cpp' not found. Downloading Data_Generator.zip...", fg="yellow")
+        url = "https://graphscope.oss-cn-beijing.aliyuncs.com/benchmark_datasets/Data_Generator.zip"
+        try:
+            r = requests.get(url)
+            r.raise_for_status()
+            with zipfile.ZipFile(io.BytesIO(r.content)) as z:
+                z.extractall(generator_dir)
+            click.secho("✅ Data_Generator.zip downloaded and extracted.", fg="green")
+        except Exception as e:
+            click.secho(f"Error downloading or extracting Data_Generator.zip: {e}", fg="red")
+            return
 
     if not os.path.exists(os.path.join(generator_dir, "generator")):
         compile_cmd = ["g++", "FFT-DG.cpp", "-o", "generator", "-O3"]
@@ -597,13 +709,28 @@ def data_generator(scale, platform, feature, compile):
 @click.option('--algorithm', help="The target algorithm to evaluate (e.g., 'pagerank').")
 def llm_evaluation(platform, algorithm):
     """Run the LLM-based usability evaluation."""
+    # Ensure .env exists for API key loading
+    if not os.path.exists(".env"):
+        click.secho("'.env' file not found. Copying from '.env.example'...", fg="yellow")
+        shutil.copy(".env.example", ".env")
+
     api_key = os.getenv("OPENAI_API_KEY")
 
     if not api_key or api_key == "your_openai_api_key_here":
         click.secho("❌ Error: OPENAI_API_KEY is not set in the .env file.", fg="red")
         return
 
-    docker_image = "llm-eval"
+    docker_image = "graphanalysisbenchmarks/llm-eval:latest"
+    # Check if the docker image exists locally, if not, try to pull it
+    try:
+        result = subprocess.run(["docker", "image", "inspect", docker_image], capture_output=True)
+        if result.returncode != 0:
+            click.secho(f"'{docker_image}' image not found locally. Pulling from Docker Hub...", fg="yellow")
+            pull_result = subprocess.run(["docker", "pull", docker_image], check=True)
+            click.secho(f"✅ '{docker_image}' image pulled successfully.", fg="green")
+    except Exception as e:
+        click.secho(f"Error checking or pulling Docker image '{docker_image}': {e}", fg="red")
+        return
 
     if platform and algorithm:
         cmd = ["docker", "run", "--rm", "-e", f"OPENAI_API_KEY={api_key}", "-e", f"PLATFORM={platform}", "-e",
@@ -618,9 +745,9 @@ def llm_evaluation(platform, algorithm):
 @click.option('--platform', required=True, type=click.Choice(PLATFORM_CONFIG.keys(), case_sensitive=False),
               help="The platform to run the benchmark on.")
 @click.option('--algorithm', required=True, type=str, help="The algorithm to run.")
-@click.option('--path', 'data_path', required=True, type=click.Path(exists=True),
-              help="Path to the dataset folder or file.")
-@click.option('--spark-master', help="Spark Master URL. Required only for GraphX platform.")
+@click.option('--path', 'data_path', required=False, default=None, type=click.Path(exists=False),
+              help="Path to the dataset file.")
+@click.option('--spark-master', default=None, help="Spark Master URL. Required only for GraphX platform.")
 def perf(platform, algorithm, data_path, spark_master):
     """Run a performance benchmark for a specified platform and algorithm."""
 
@@ -628,20 +755,109 @@ def perf(platform, algorithm, data_path, spark_master):
     config = PLATFORM_CONFIG.get(platform)
     algos_map = config.get('algos', {})
 
-
     # Validate if the user's input is a valid standard algorithm name (a key in the map)
     if algorithm not in algos_map.keys():
         click.secho(f"❌ Error: Algorithm '{algorithm}' is not supported by platform '{platform}'.", fg="red")
         click.echo(f"Supported standard algorithms for '{platform}': {', '.join(algos_map.keys())}")
-        return
+        sys.exit(1)
 
     # Translate the standard name to the platform-specific name for execution
     platform_specific_algorithm = algos_map[algorithm]
 
     platform_dir = config['dir']
 
-    # Special handling for GraphX
+    # sample_data_dir = "sample_data"
+    # os.makedirs(sample_data_dir, exist_ok=True)
+
+    dataset_urls = [
+        "https://graphscope.oss-cn-beijing.aliyuncs.com/benchmark_datasets/sample_data.zip",
+    ]
+    # Check if sample_data folder exists; if so, skip download
+    if os.path.exists("sample_data"):
+        click.secho("sample_data folder already exists. Skipping dataset download.", fg="cyan")
+    else:
+        for url in dataset_urls:
+            filename = os.path.basename(url)
+            file_path = os.path.join(filename)
+            if not os.path.exists(file_path):
+                click.secho(f"Downloading dataset: {filename} ...", fg="yellow")
+                try:
+                    response = requests.get(url, stream=True)
+                    response.raise_for_status()
+                    with open(file_path, "wb") as f:
+                        for chunk in response.iter_content(chunk_size=8192):
+                            f.write(chunk)
+                    click.secho(f"✅ Downloaded: {filename}", fg="green")
+                    if filename.endswith(".zip"):
+                        with zipfile.ZipFile(file_path, "r") as zip_ref:
+                            zip_ref.extractall()
+                        click.secho(f"✅ Extracted: {filename}", fg="green")
+                        # Remove zip file after extraction
+                        os.remove(file_path)
+                        click.secho(f"🗑️ Removed zip file: {filename}", fg="green")
+                except Exception as e:
+                    click.secho(f"❌ Failed to download {filename}: {e}", fg="red")
+            else:
+                click.secho(f"Dataset already exists: {filename}", fg="cyan")
+
     if platform == 'graphx':
+
+        # Download all related .jar and .sh files for GraphX
+        graphx_base_url = "https://graphscope.oss-cn-beijing.aliyuncs.com/benchmark_datasets/"
+        graphx_files = [
+            "pagerankexample_2.11-0.1.jar",
+            "ssspexample_2.11-0.1.jar",
+            "trianglecountingexample_2.11-0.1.jar",
+            "labelpropagationexample_2.11-0.1.jar",
+            "coreexample_2.11-0.1.jar",
+            "connectedcomponentexample_2.11-0.1.jar",
+            "betweennesscentralityexample_2.11-0.1.jar",
+            "kcliqueexample_2.11-0.1.jar",
+        ]
+        graphx_sh_files = [
+            "pagerank.sh", "sssp.sh", "trianglecounting.sh", "labelpropagation.sh",
+            "core.sh", "connectedcomponent.sh", "betweennesscentrality.sh", "kclique.sh"
+        ]
+        # If GraphX directory does not exist, create it
+        if not os.path.exists(platform_dir):
+            click.secho(f"GraphX directory '{platform_dir}' not found. Creating...", fg="yellow")
+            os.makedirs(platform_dir, exist_ok=True)
+
+        # Download .jar files if missing
+        for fname in graphx_files:
+            fpath = os.path.join(platform_dir, fname)
+            url = graphx_base_url + fname
+            if not os.path.exists(fpath):
+                click.secho(f"Downloading GraphX jar: {fname} ...", fg="yellow")
+                try:
+                    resp = requests.get(url, stream=True)
+                    resp.raise_for_status()
+                    with open(fpath, "wb") as f:
+                        for chunk in resp.iter_content(chunk_size=8192):
+                            f.write(chunk)
+                        click.secho(f"✅ Downloaded: {fname}", fg="green")
+                except Exception as e:
+                    click.secho(f"❌ Failed to download {fname}: {e}", fg="red")
+                else:
+                    click.secho(f"Jar already exists: {fname}", fg="cyan")
+        # Download .sh files if missing
+        for sh_file in graphx_sh_files:
+            sh_path = os.path.join(platform_dir, sh_file)
+            url = graphx_base_url + sh_file
+            if not os.path.exists(sh_path):
+                click.secho(f"Downloading GraphX script: {sh_file} ...", fg="yellow")
+                try:
+                    resp = requests.get(url, stream=True)
+                    resp.raise_for_status()
+                    with open(sh_path, "wb") as f:
+                        for chunk in resp.iter_content(chunk_size=8192):
+                            f.write(chunk)
+                    click.secho(f"✅ Downloaded: {sh_file}", fg="green")
+                except Exception as e:
+                    click.secho(f"❌ Failed to download {sh_file}: {e}", fg="red")
+                else:
+                    click.secho(f"Script already exists: {sh_file}", fg="cyan")
+
         if not spark_master:
             click.secho("❌ Error: --spark-master is required for the 'graphx' platform.", fg="red")
             return
@@ -664,11 +880,18 @@ def perf(platform, algorithm, data_path, spark_master):
             click.secho(f"❌ Error: Script '{script_path}' not found.", fg="red")
             return
 
+        # If data_path is None, use default sample graph according to algorithm
+        if data_path is None:
+            if algorithm == "pagerank":
+                data_path = os.path.abspath("sample_data/graphx_sample_graph.txt")
+            else:
+                data_path = os.path.abspath("sample_data/graphx_weight_sample_graph.txt")
         cmd = [f"./{script_filename}", spark_master, data_path]
         run_command(cmd, working_dir=platform_dir)
 
     # General handling for all other platforms
     else:
+        
         if platform == "ligra":
             run_ligra_perf(platform_specific_algorithm, data_path)
         elif platform == "grape":
