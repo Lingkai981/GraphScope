@@ -1,9 +1,8 @@
-# main.py
+# gab_cli.py
 import os
 import subprocess
-import click
+import argparse
 from dotenv import load_dotenv
-import tempfile
 import shutil
 import requests, zipfile, io
 import sys
@@ -11,7 +10,6 @@ import sys
 
 # Load environment variables from .env file at the start
 load_dotenv()
-
 
 def run_flash_perf(algorithm, data_path=None):
     THREAD_LIST = [1, 2, 4, 8, 16, 32]
@@ -853,7 +851,7 @@ def run_powergraph_perf(algorithm, data_path=None):
 # --- Helper Functions ---
 def run_command(command, working_dir="."):
     """Executes a shell command and prints its output."""
-    click.echo(f"▶️  Executing in '{working_dir}': {' '.join(command)}")
+    print(f"▶️  Executing in '{working_dir}': {' '.join(command)}")
     try:
         # Using shell=False and a list of args is safer
         result = subprocess.run(
@@ -864,28 +862,27 @@ def run_command(command, working_dir="."):
             text=True,
             encoding="utf-8",
         )
-        click.echo("✅ Command executed successfully.")
+        print("✅ Command executed successfully.")
         if result.stdout:
-            click.echo("--- STDOUT ---")
-            click.echo(result.stdout)
+            print("--- STDOUT ---")
+            print(result.stdout)
         if result.stderr:
-            click.echo("--- STDERR ---")
-            click.echo(result.stderr)
+            print("--- STDERR ---")
+            print(result.stderr)
     except FileNotFoundError:
-        click.secho(
-            f"❌ Error: Command '{command[0]}' not found. Make sure it's in your PATH or in the '{working_dir}' directory.",
-            fg="red",
+        print(
+            f"❌ Error: Command '{command[0]}' not found. Make sure it's in your PATH or in the '{working_dir}' directory."
         )
     except subprocess.CalledProcessError as e:
-        click.secho(f"❌ Command failed with exit code: {e.returncode}", fg="red")
+        print(f"❌ Command failed with exit code: {e.returncode}")
         if e.stdout:
-            click.secho("--- STDOUT ---", fg="yellow")
-            click.secho(e.stdout, fg="yellow")
+            print("--- STDOUT ---")
+            print(e.stdout)
         if e.stderr:
-            click.secho("--- STDERR ---", fg="yellow")
-            click.secho(e.stderr, fg="yellow")
+            print("--- STDERR ---")
+            print(e.stderr)
     except Exception as e:
-        click.secho(f"💥 An unexpected error occurred: {e}", fg="red")
+        print(f"💥 An unexpected error occurred: {e}")
 
 
 # --- Helper Functions for Performance Evaluation ---
@@ -897,34 +894,32 @@ def download_sample_datasets():
 
     # Check if sample_data folder exists; if so, skip download
     if os.path.exists("sample_data"):
-        click.secho(
-            "sample_data folder already exists. Skipping dataset download.", fg="cyan"
-        )
+        print("sample_data folder already exists. Skipping dataset download.")
         return
 
     for url in dataset_urls:
         filename = os.path.basename(url)
         file_path = os.path.join(filename)
         if not os.path.exists(file_path):
-            click.secho(f"Downloading dataset: {filename} ...", fg="yellow")
+            print(f"Downloading dataset: {filename} ...")
             try:
                 response = requests.get(url, stream=True)
                 response.raise_for_status()
                 with open(file_path, "wb") as f:
                     for chunk in response.iter_content(chunk_size=8192):
                         f.write(chunk)
-                click.secho(f"✅ Downloaded: {filename}", fg="green")
+                print(f"✅ Downloaded: {filename}")
                 if filename.endswith(".zip"):
                     with zipfile.ZipFile(file_path, "r") as zip_ref:
                         zip_ref.extractall()
-                    click.secho(f"✅ Extracted: {filename}", fg="green")
+                    print(f"✅ Extracted: {filename}")
                     # Remove zip file after extraction
                     os.remove(file_path)
-                    click.secho(f"🗑️ Removed zip file: {filename}", fg="green")
+                    print(f"🗑️ Removed zip file: {filename}")
             except Exception as e:
-                click.secho(f"❌ Failed to download {filename}: {e}", fg="red")
+                print(f"❌ Failed to download {filename}: {e}")
         else:
-            click.secho(f"Dataset already exists: {filename}", fg="cyan")
+            print(f"Dataset already exists: {filename}")
 
 
 def setup_graphx_files(platform_dir):
@@ -955,9 +950,7 @@ def setup_graphx_files(platform_dir):
 
     # If GraphX directory does not exist, create it
     if not os.path.exists(platform_dir):
-        click.secho(
-            f"GraphX directory '{platform_dir}' not found. Creating...", fg="yellow"
-        )
+        print(f"GraphX directory '{platform_dir}' not found. Creating...")
         os.makedirs(platform_dir, exist_ok=True)
 
     # Download .jar files if missing
@@ -965,36 +958,36 @@ def setup_graphx_files(platform_dir):
         fpath = os.path.join(platform_dir, fname)
         url = graphx_base_url + fname
         if not os.path.exists(fpath):
-            click.secho(f"Downloading GraphX jar: {fname} ...", fg="yellow")
+            print(f"Downloading GraphX jar: {fname} ...")
             try:
                 resp = requests.get(url, stream=True)
                 resp.raise_for_status()
                 with open(fpath, "wb") as f:
                     for chunk in resp.iter_content(chunk_size=8192):
                         f.write(chunk)
-                click.secho(f"✅ Downloaded: {fname}", fg="green")
+                print(f"✅ Downloaded: {fname}")
             except Exception as e:
-                click.secho(f"❌ Failed to download {fname}: {e}", fg="red")
+                print(f"❌ Failed to download {fname}: {e}")
         else:
-            click.secho(f"Jar already exists: {fname}", fg="cyan")
+            print(f"Jar already exists: {fname}")
 
     # Download .sh files if missing
     for sh_file in graphx_sh_files:
         sh_path = os.path.join(platform_dir, sh_file)
         url = graphx_base_url + sh_file
         if not os.path.exists(sh_path):
-            click.secho(f"Downloading GraphX script: {sh_file} ...", fg="yellow")
+            print(f"Downloading GraphX script: {sh_file} ...")
             try:
                 resp = requests.get(url, stream=True)
                 resp.raise_for_status()
                 with open(sh_path, "wb") as f:
                     for chunk in resp.iter_content(chunk_size=8192):
                         f.write(chunk)
-                click.secho(f"✅ Downloaded: {sh_file}", fg="green")
+                print(f"✅ Downloaded: {sh_file}")
             except Exception as e:
-                click.secho(f"❌ Failed to download {sh_file}: {e}", fg="red")
+                print(f"❌ Failed to download {sh_file}: {e}")
         else:
-            click.secho(f"Script already exists: {sh_file}", fg="cyan")
+            print(f"Script already exists: {sh_file}")
 
 
 # --- Platform & Algorithm Definitions ---
@@ -1082,59 +1075,27 @@ PLATFORM_CONFIG = {
 }
 
 
-# --- CLI Main Group ---
-@click.group(context_settings=dict(help_option_names=["-h", "--help"]))
-def main():
-    """
-    Unified CLI for Graph-Analytics-Benchmarks.
-
-    Provides a single entry point for data generation, LLM usability evaluation,
-    and cross-platform performance benchmarking.
-    """
-    pass
-
-
-# --- 1. Data Generator ---
-@main.command(name="datagen", help="--scale <S> --platform <P> --feature <F>")
-@click.option(
-    "--scale", required=True, type=str, help="Dataset scale (e.g., 8, 9, 10)."
-)
-@click.option(
-    "--platform",
-    required=True,
-    type=click.Choice(
-        ["flash", "ligra", "grape", "gthinker", "pregel+", "powergraph", "graphx"],
-        case_sensitive=False,
-    ),
-    help="Target platform for output format.",
-)
-@click.option(
-    "--feature",
-    required=True,
-    type=click.Choice(["Standard", "Density", "Diameter"], case_sensitive=False),
-    help="Dataset feature.",
-)
-def data_generator(scale, platform, feature, compile):
+# --- CLI Subcommand Handlers ---
+def data_generator(args):
     """Run the FFT-DG data generator."""
+    scale = args.scale
+    platform = args.platform
+    feature = args.feature
+
     generator_dir = "Data_Generator"
     generator_exe = "./generator"
 
     if not os.path.exists(os.path.join(generator_dir, "FFT-DG.cpp")):
-        click.secho(
-            f"'{generator_dir}/FFT-DG.cpp' not found. Downloading Data_Generator.zip...",
-            fg="yellow",
-        )
+        print(f"'{generator_dir}/FFT-DG.cpp' not found. Downloading Data_Generator.zip...")
         url = "https://graphscope.oss-cn-beijing.aliyuncs.com/benchmark_datasets/Data_Generator.zip"
         try:
             r = requests.get(url)
             r.raise_for_status()
             with zipfile.ZipFile(io.BytesIO(r.content)) as z:
                 z.extractall(generator_dir)
-            click.secho("✅ Data_Generator.zip downloaded and extracted.", fg="green")
+            print("✅ Data_Generator.zip downloaded and extracted.")
         except Exception as e:
-            click.secho(
-                f"Error downloading or extracting Data_Generator.zip: {e}", fg="red"
-            )
+            print(f"Error downloading or extracting Data_Generator.zip: {e}")
             return
 
     if not os.path.exists(os.path.join(generator_dir, "generator")):
@@ -1145,25 +1106,20 @@ def data_generator(scale, platform, feature, compile):
     run_command(run_cmd, working_dir=generator_dir)
 
 
-# --- 2. LLM-based Usability Evaluation ---
-@main.command(name="llm-eval", help="--platform <P> --algorithm <A>")
-@click.option("--platform", help="The target platform to evaluate (e.g., 'grape').")
-@click.option(
-    "--algorithm", help="The target algorithm to evaluate (e.g., 'pagerank')."
-)
-def llm_evaluation(platform, algorithm):
+def llm_evaluation(args):
     """Run the LLM-based usability evaluation."""
+    platform = args.platform
+    algorithm = args.algorithm
+
     # Ensure .env exists for API key loading
     if not os.path.exists(".env"):
-        click.secho(
-            "'.env' file not found. Copying from '.env.example'...", fg="yellow"
-        )
+        print("'.env' file not found. Copying from '.env.example'...")
         shutil.copy(".env.example", ".env")
 
     api_key = os.getenv("OPENAI_API_KEY")
 
     if not api_key or api_key == "your_openai_api_key_here":
-        click.secho("❌ Error: OPENAI_API_KEY is not set in the .env file.", fg="red")
+        print("❌ Error: OPENAI_API_KEY is not set in the .env file.")
         return
 
     docker_image = "graphanalysisbenchmarks/llm-eval:latest"
@@ -1171,10 +1127,7 @@ def llm_evaluation(platform, algorithm):
     # Get docker executable path for security
     docker = shutil.which("docker")
     if docker is None:
-        click.secho(
-            "❌ Error: docker command not found in PATH. Please install Docker.",
-            fg="red",
-        )
+        print("❌ Error: docker command not found in PATH. Please install Docker.")
         return
 
     # Check if the docker image exists locally, if not, try to pull it
@@ -1183,16 +1136,11 @@ def llm_evaluation(platform, algorithm):
             [docker, "image", "inspect", docker_image], capture_output=True
         )
         if result.returncode != 0:
-            click.secho(
-                f"'{docker_image}' image not found locally. Pulling from Docker Hub...",
-                fg="yellow",
-            )
-            pull_result = subprocess.run([docker, "pull", docker_image], check=True)
-            click.secho(f"✅ '{docker_image}' image pulled successfully.", fg="green")
+            print(f"'{docker_image}' image not found locally. Pulling from Docker Hub...")
+            subprocess.run([docker, "pull", docker_image], check=True)
+            print(f"✅ '{docker_image}' image pulled successfully.")
     except Exception as e:
-        click.secho(
-            f"Error checking or pulling Docker image '{docker_image}': {e}", fg="red"
-        )
+        print(f"Error checking or pulling Docker image '{docker_image}': {e}")
         return
 
     if platform and algorithm:
@@ -1210,48 +1158,25 @@ def llm_evaluation(platform, algorithm):
         ]
         run_command(cmd)
     else:
-        click.secho("Error: Both --platform and --algorithm are required.", fg="red")
+        print("Error: Both --platform and --algorithm are required.")
 
 
-# --- 3. Performance Evaluation ---
-@main.command(
-    name="perf-eval",
-    help="--platform <P> --algorithm <A> --path <D> --spark-master <M>",
-)
-@click.option(
-    "--platform",
-    required=True,
-    type=click.Choice(PLATFORM_CONFIG.keys(), case_sensitive=False),
-    help="The platform to run the benchmark on.",
-)
-@click.option("--algorithm", required=True, type=str, help="The algorithm to run.")
-@click.option(
-    "--path",
-    "data_path",
-    required=False,
-    default=None,
-    type=click.Path(exists=False),
-    help="Path to the dataset file.",
-)
-@click.option(
-    "--spark-master",
-    default=None,
-    help="Spark Master URL. Required only for GraphX platform.",
-)
-def perf(platform, algorithm, data_path, spark_master):
+def perf(args):
     """Run a performance benchmark for a specified platform and algorithm."""
+    platform = args.platform.lower()
+    algorithm = args.algorithm
+    data_path = args.path
+    spark_master = args.spark_master
 
-    platform = platform.lower()  # Normalize platform name
     config = PLATFORM_CONFIG.get(platform)
     algos_map = config.get("algos", {})
 
     # Validate if the user's input is a valid standard algorithm name (a key in the map)
-    if algorithm not in algos_map.keys():
-        click.secho(
-            f"❌ Error: Algorithm '{algorithm}' is not supported by platform '{platform}'.",
-            fg="red",
+    if algorithm not in algos_map:
+        print(
+            f"❌ Error: Algorithm '{algorithm}' is not supported by platform '{platform}'."
         )
-        click.echo(
+        print(
             f"Supported standard algorithms for '{platform}': {', '.join(algos_map.keys())}"
         )
         sys.exit(1)
@@ -1268,10 +1193,7 @@ def perf(platform, algorithm, data_path, spark_master):
         setup_graphx_files(platform_dir)
 
         if not spark_master:
-            click.secho(
-                "❌ Error: --spark-master is required for the 'graphx' platform.",
-                fg="red",
-            )
+            print("❌ Error: --spark-master is required for the 'graphx' platform.")
             return
 
         script_name_map = {
@@ -1288,16 +1210,15 @@ def perf(platform, algorithm, data_path, spark_master):
         script_filename = script_name_map.get(algorithm)
 
         if not script_filename:
-            click.secho(
-                f"Internal error: No script mapping for GraphX algorithm '{algorithm}'.",
-                fg="red",
+            print(
+                f"Internal error: No script mapping for GraphX algorithm '{algorithm}'."
             )
             return
 
         script_path = os.path.join(platform_dir, script_filename)
 
         if not os.path.exists(script_path):
-            click.secho(f"❌ Error: Script '{script_path}' not found.", fg="red")
+            print(f"❌ Error: Script '{script_path}' not found.")
             return
 
         # If data_path is None, use default sample graph according to algorithm
@@ -1313,7 +1234,6 @@ def perf(platform, algorithm, data_path, spark_master):
 
     # General handling for all other platforms
     else:
-
         if platform == "ligra":
             run_ligra_perf(platform_specific_algorithm, data_path)
         elif platform == "grape":
@@ -1326,6 +1246,48 @@ def perf(platform, algorithm, data_path, spark_master):
             run_powergraph_perf(platform_specific_algorithm, data_path)
         elif platform == "flash":
             run_flash_perf(platform_specific_algorithm, data_path)
+
+
+# --- CLI Main Entry ---
+def main():
+    """
+    Unified CLI for Graph-Analytics-Benchmarks.
+
+    Provides a single entry point for data generation, LLM usability evaluation,
+    and cross-platform performance benchmarking.
+    """
+    parser = argparse.ArgumentParser(
+        description="Unified CLI for Graph-Analytics-Benchmarks."
+    )
+    subparsers = parser.add_subparsers(dest="command", help="Available commands")
+
+    # --- 1. datagen ---
+    PLATFORM_CHOICES = ["flash", "ligra", "grape", "gthinker", "pregel+", "powergraph", "graphx"]
+    datagen_parser = subparsers.add_parser("datagen", help="Run the FFT-DG data generator.")
+    datagen_parser.add_argument("--scale", required=True, type=str, help="Dataset scale (e.g., 8, 9, 10).")
+    datagen_parser.add_argument("--platform", required=True, type=str.lower, choices=PLATFORM_CHOICES, help="Target platform for output format.")
+    datagen_parser.add_argument("--feature", required=True, type=str, choices=["Standard", "Density", "Diameter"], help="Dataset feature.")
+    datagen_parser.set_defaults(func=data_generator)
+
+    # --- 2. llm-eval ---
+    llm_parser = subparsers.add_parser("llm-eval", help="Run the LLM-based usability evaluation.")
+    llm_parser.add_argument("--platform", required=True, help="The target platform to evaluate (e.g., 'grape').")
+    llm_parser.add_argument("--algorithm", required=True, help="The target algorithm to evaluate (e.g., 'pagerank').")
+    llm_parser.set_defaults(func=llm_evaluation)
+
+    # --- 3. perf-eval ---
+    perf_parser = subparsers.add_parser("perf-eval", help="Run a performance benchmark.")
+    perf_parser.add_argument("--platform", required=True, type=str.lower, choices=list(PLATFORM_CONFIG.keys()), help="The platform to run the benchmark on.")
+    perf_parser.add_argument("--algorithm", required=True, type=str, help="The algorithm to run.")
+    perf_parser.add_argument("--path", default=None, help="Path to the dataset file.")
+    perf_parser.add_argument("--spark-master", default=None, help="Spark Master URL. Required only for GraphX platform.")
+    perf_parser.set_defaults(func=perf)
+
+    args = parser.parse_args()
+    if not args.command:
+        parser.print_help()
+        sys.exit(1)
+    args.func(args)
 
 
 if __name__ == "__main__":

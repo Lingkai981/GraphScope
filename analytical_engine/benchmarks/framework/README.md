@@ -72,7 +72,7 @@ Researchers, practitioners, and educators in graph systems and distributed compu
 
 ### Global help
 ```bash
-python3 cli.py --help
+python3 gab_cli.py --help
 ```
 
 ### `datagen` Data Generation
@@ -82,7 +82,7 @@ We provide a lightweight C++ program (download from [Data_Generator.zip](https:/
 
 #### Usage
 ```bash
-python3 cli.py datagen --platform <platform> --scale <scale> --feature <feature>
+python3 gab_cli.py datagen --platform <platform> --scale <scale> --feature <feature>
 ```
 - **--platform**: Target graph system (e.g., `flash`, `ligra`, `grape`, `gthinker`, `pregel+`, `powergraph`, `graphx`)
 - **--scale**: Graph scale (e.g., `8`, `9`, `10`, or custom value)
@@ -90,7 +90,7 @@ python3 cli.py datagen --platform <platform> --scale <scale> --feature <feature>
 
 #### Example
 ```bash
-python3 cli.py datagen --scale 9 --platform flash --feature Standard
+python3 gab_cli.py datagen --scale 9 --platform flash --feature Standard
 ```
 ---
 
@@ -101,14 +101,14 @@ python3 cli.py datagen --scale 9 --platform flash --feature Standard
 
 #### Usage
 ```bash
-python3 cli.py llm-eval --platform <platform> --algorithm <algorithm>
+python3 gab_cli.py llm-eval --platform <platform> --algorithm <algorithm>
 ```
 - **--platform**: Target graph system (e.g., `flash`, `ligra`, `grape`, `gthinker`, `pregel+`, `powergraph`, `graphx`)
 - **--algorithm**: Algorithm to evaluate usability (e.g., `pagerank`, `sssp`, `triangle`, `bc`, `cd`, `lpa`, `kclique`, `cc`)
 
 #### Example
 ```bash
-python3 cli.py llm-eval --platform flash --algorithm pagerank
+python3 gab_cli.py llm-eval --platform flash --algorithm pagerank
 ```
 
 ---
@@ -121,7 +121,7 @@ python3 cli.py llm-eval --platform flash --algorithm pagerank
 
 #### Usage
 ```bash
-python3 cli.py perf-eval --platform <platform> --algorithm <algorithm> [--path <dataset_file>] [--spark-master <spark-master>]
+python3 gab_cli.py perf-eval --platform <platform> --algorithm <algorithm> [--path <dataset_file>] [--spark-master <spark-master>]
 ```
 - **--platform**: Target graph system (e.g., `flash`, `ligra`, `grape`, `gthinker`, `pregel+`, `powergraph`, `graphx`)
 - **--algorithm**: Algorithm to run (e.g., `pagerank`, `sssp`, `triangle`, `bc`, `cd`, `lpa`, `kclique`, `cc`)
@@ -139,16 +139,16 @@ python3 cli.py perf-eval --platform <platform> --algorithm <algorithm> [--path <
 #### Examples
 ```bash
 # Run PageRank on Flash
-python3 cli.py perf-eval --platform flash --algorithm pagerank --path sample_data/flash_sample_graph/
+python3 gab_cli.py perf-eval --platform flash --algorithm pagerank --path sample_data/flash_sample_graph/
 
 # Run PageRank on Grape
-python3 cli.py perf-eval --platform grape --algorithm pagerank --path sample_data/grape_sample_graph
+python3 gab_cli.py perf-eval --platform grape --algorithm pagerank --path sample_data/grape_sample_graph
 
 # Run PageRank on Ligra
-python3 cli.py perf-eval --platform ligra --algorithm pagerank --path sample_data/ligra_sample_graph.txt
+python3 gab_cli.py perf-eval --platform ligra --algorithm pagerank --path sample_data/ligra_sample_graph.txt
 
 # Run Triangle Counting on GraphX
-python3 cli.py perf-eval --platform graphx --algorithm triangle --path sample_data/graphx_sample_graph.txt --spark-master spark://spark-master:7077
+python3 gab_cli.py perf-eval --platform graphx --algorithm triangle --path sample_data/graphx_sample_graph.txt --spark-master spark://spark-master:7077
 ```
 ---     
 
